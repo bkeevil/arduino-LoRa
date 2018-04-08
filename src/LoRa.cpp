@@ -1,6 +1,3 @@
-// Copyright (c) Sandeep Mistry. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
-
 #include <LoRa.h>
 
 // registers
@@ -17,17 +14,14 @@
 #define REG_FIFO_RX_CURRENT_ADDR 0x10
 #define REG_IRQ_FLAGS            0x12
 #define REG_RX_NB_BYTES          0x13
-#define REG_PKT_SNR_VALUE        0x19
 #define REG_PKT_RSSI_VALUE       0x1a
+#define REG_PKT_SNR_VALUE        0x1b
 #define REG_MODEM_CONFIG_1       0x1d
 #define REG_MODEM_CONFIG_2       0x1e
 #define REG_PREAMBLE_MSB         0x20
 #define REG_PREAMBLE_LSB         0x21
 #define REG_PAYLOAD_LENGTH       0x22
 #define REG_MODEM_CONFIG_3       0x26
-#define REG_FREQ_ERROR_MSB       0x28
-#define REG_FREQ_ERROR_MID       0x29
-#define REG_FREQ_ERROR_LSB       0x2a
 #define REG_RSSI_WIDEBAND        0x2c
 #define REG_DETECTION_OPTIMIZE   0x31
 #define REG_DETECTION_THRESHOLD  0x37
@@ -69,18 +63,16 @@ int LoRaClass::begin(long frequency)
 {
   // setup pins
   pinMode(_ss, OUTPUT);
+  pinMode(_reset, OUTPUT);
+
+  // perform reset
+  digitalWrite(_reset, LOW);
+  delay(10);
+  digitalWrite(_reset, HIGH);
+  delay(10);
+
   // set SS high
   digitalWrite(_ss, HIGH);
-
-  if (_reset != -1) {
-    pinMode(_reset, OUTPUT);
-
-    // perform reset
-    digitalWrite(_reset, LOW);
-    delay(10);
-    digitalWrite(_reset, HIGH);
-    delay(10);
-  }
 
   // start SPI
   SPI.begin();
@@ -149,9 +141,7 @@ int LoRaClass::endPacket()
   writeRegister(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_TX);
 
   // wait for TX done
-  while ((readRegister(REG_IRQ_FLAGS) & IRQ_TX_DONE_MASK) == 0) {
-    yield();
-  }
+  while((readRegister(REG_IRQ_FLAGS) & IRQ_TX_DONE_MASK) == 0);
 
   // clear IRQ's
   writeRegister(REG_IRQ_FLAGS, IRQ_TX_DONE_MASK);
@@ -212,25 +202,6 @@ int LoRaClass::packetRssi()
 float LoRaClass::packetSnr()
 {
   return ((int8_t)readRegister(REG_PKT_SNR_VALUE)) * 0.25;
-}
-
-long LoRaClass::packetFrequencyError()
-{
-  int32_t freqError = 0;
-  freqError = static_cast<int32_t>(readRegister(REG_FREQ_ERROR_MSB) & B111);
-  freqError <<= 8L;
-  freqError += static_cast<int32_t>(readRegister(REG_FREQ_ERROR_MID));
-  freqError <<= 8L;
-  freqError += static_cast<int32_t>(readRegister(REG_FREQ_ERROR_LSB));
-
-  if (readRegister(REG_FREQ_ERROR_MSB) & B1000) { // Sign bit is on
-     freqError -= 524288; // B1000'0000'0000'0000'0000
-  }
-
-  const float fXtal = 32E6; // FXOSC: crystal oscillator (XTAL) frequency (2.5. Chip Specification, p. 14)
-  const float fError = ((static_cast<float>(freqError) * (1L << 24)) / fXtal) * (getSignalBandwidth() / 500000.0f); // p. 37
-
-  return static_cast<long>(fError);
 }
 
 size_t LoRaClass::write(uint8_t byte)
@@ -301,18 +272,11 @@ void LoRaClass::onReceive(void(*callback)(int))
   _onReceive = callback;
 
   if (callback) {
-    pinMode(_dio0, INPUT);
-
     writeRegister(REG_DIO_MAPPING_1, 0x00);
-#ifdef SPI_HAS_NOTUSINGINTERRUPT
-    SPI.usingInterrupt(digitalPinToInterrupt(_dio0));
-#endif
+
     attachInterrupt(digitalPinToInterrupt(_dio0), LoRaClass::onDio0Rise, RISING);
   } else {
     detachInterrupt(digitalPinToInterrupt(_dio0));
-#ifdef SPI_HAS_NOTUSINGINTERRUPT
-    SPI.notUsingInterrupt(digitalPinToInterrupt(_dio0));
-#endif
   }
 }
 
@@ -390,23 +354,6 @@ void LoRaClass::setSpreadingFactor(int sf)
   }
 
   writeRegister(REG_MODEM_CONFIG_2, (readRegister(REG_MODEM_CONFIG_2) & 0x0f) | ((sf << 4) & 0xf0));
-}
-
-long LoRaClass::getSignalBandwidth()
-{
-  byte bw = (readRegister(REG_MODEM_CONFIG_1) >> 4);
-  switch (bw) {
-    case 0: return 7.8E3;
-    case 1: return 10.4E3; 
-    case 2: return 15.6E3; 
-    case 3: return 20.8E3; 
-    case 4: return 31.25E3; 
-    case 5: return 41.7E3; 
-    case 6: return 62.5E3; 
-    case 7: return 125E3; 
-    case 8: return 250E3; 
-    case 9: return 500E3; 
-  }
 }
 
 void LoRaClass::setSignalBandwidth(long sbw)
@@ -498,6 +445,215 @@ void LoRaClass::dumpRegisters(Stream& out)
     out.println(readRegister(i), HEX);
   }
 }
+
+void LoRaClass::dumpSettings(Stream& out)
+{
+  byte reg;
+  byte b;
+  bool loramode = false;
+
+  reg = readRegister(REG_OP_MODE);
+  if (reg & 0x80 == 0x80) {
+    loramode = true;
+    out.println("LoRa Mode");
+  } else {
+    if (reg & 0x40 == 0x40) {
+      out.println("Reserved Mode");
+    } else {
+      if (reg & 0x20 == 0x20) {
+        out.println("OOK Mode");
+      } else {
+        out.println("FSK Mode");
+      }
+    }
+  }
+  if (reg & 0x08 == 0x08) {
+    out.println("High Frequency Mode");
+  } else {
+    out.println("Low Frequency Mode");
+  }
+  out.print("Transciever Mode: ");
+  
+  switch (reg & 0x7) {
+    case 0: out.println("Sleep"); break;
+    case 1: out.println("Standby"); break;
+    case 2: out.println("FSTx"); break;
+    case 3: out.println("Tx"); break;
+    case 4: out.println("FSRx"); break;
+  }
+  if (loramode) {
+    switch (reg & 0x7) {
+      case 5: out.println("RxContinuous"); break;
+      case 6: out.println("RxSingle"); break;
+      case 7: out.println("Channel Activity Detection"); break;
+    }
+  } else {
+    switch (reg & 0x7) {
+      case 5: out.println("Rx"); break;
+      case 6: 
+      case 7: out.println("Reserved"); break;
+    }
+  }
+
+  uint64_t frf = 0; 
+  reg = readRegister(REG_FRF_MSB);
+  frf = (uint64_t)reg << 16;
+  reg = readRegister(REG_FRF_MID);
+  frf += (uint64_t)reg << 8;
+  reg = readRegister(REG_FRF_LSB);
+  frf += (uint64_t)reg << 0;
+  uint64_t frequency = (frf * 32000000) >> 19;
+  out.print("RF Freq: "); out.println((long)frequency);
+  
+  reg = readRegister(REG_PA_CONFIG);
+  b = (reg & 0x70) >> 4;
+  float pmax = 10.8+(0.6*b);
+  out.print("Max Power: "); out.print(pmax); out.println(" dBm");
+  b = (reg & 0x0F);  
+  float pout;
+  out.print("PA Output: ");
+  if (reg & 0x80 == 0x80) {
+    out.println("RFO");
+    pout = pmax-(15-b); 
+  } else {
+    out.println("PA_BOOST");
+    pout = 17-(15-b);
+  }
+  out.print("Output Power: "); out.print(pout); out.println(" dBm");
+
+  reg = readRegister(REG_LNA);
+  b = reg >> 5;
+  out.print("LNA Gain: ");
+  switch (b) {
+    case 1: out.println("G1"); break;
+    case 2: out.println("G2"); break;
+    case 3: out.println("G3"); break;
+    case 4: out.println("G4"); break;
+    case 5: out.println("G5"); break;
+    case 6: out.println("G6"); break;
+  }
+  out.print("LNA Current Boost: "); 
+  if (reg & 0x03 == 0x03) {
+    out.println("On");
+  } else {
+    out.println("Off");
+  }
+
+  reg = readRegister(REG_IRQ_FLAGS);
+  out.print("IRQ Flags:");
+  if (reg & 0x80 == 0x80) out.print(" RxTimeout");
+  if (reg & 0x40 == 0x40) out.print(" RxDone");
+  if (reg & 0x20 == 0x20) out.print(" PayloadCRCError");
+  if (reg & 0x10 == 0x10) out.print(" ValidHeader");
+  if (reg & 0x8 == 0x8) out.print(" TxDone");
+  if (reg & 0x4 == 0x4) out.print(" CadDone");
+  if (reg & 0x2 == 0x2) out.print(" FHSSChannelChange");
+  if (reg & 0x1 == 0x1) out.print(" CadDetected"); 
+  out.println();
+
+ /* reg = readRegister(REG_RX_NB_BYTES);
+  out.print("Last Payload Size: "); out.println(reg);
+
+  reg = readRegister(REG_PKT_RSSI_VALUE);
+  out.print("Last RSSI Value: "); out.print(-157+reg); out.println(" dBm");
+ 
+  reg = readRegister(REG_PKT_SNR_VALUE);
+  b = -(unsigned int)reg;
+  out.print("Last SNR Value: "); out.print(b/4.0); out.println(" dB"); */
+
+  reg = readRegister(REG_MODEM_CONFIG_1);
+  b = reg >> 4;
+  out.print("Signal Bandwidth: ");
+  switch (b) {
+    case 0: out.println("7.8Khz"); break;
+    case 1: out.println("10.4Khz"); break;
+    case 2: out.println("15.6Khz"); break;
+    case 3: out.println("20.8Khz"); break;
+    case 4: out.println("31.25Khz"); break;
+    case 5: out.println("41.7Khz"); break;
+    case 6: out.println("62.5Khz"); break;
+    case 7: out.println("125Khz"); break;
+    case 8: out.println("250Khz"); break;
+    case 9: out.println("500Khz"); break;
+    default: out.println("Reserved"); break;
+  }
+  b = (reg >> 1) & 0x7;
+  out.print("Coding Rate:");
+  switch (b) {
+    case 1: out.println("4/5"); break;
+    case 2: out.println("4/6"); break;
+    case 3: out.println("4/7"); break;
+    case 4: out.println("4/8"); break;
+    default: out.println("Reserved"); break; 
+  }
+  if (reg & 0x1 == 0x1) {
+    out.println("Implicit Header Mode");
+  } else {
+    out.println("Explicit Header Mode");
+  }
+
+  reg = readRegister(REG_MODEM_CONFIG_2);
+  b = reg >> 4;
+  out.print("Spreading Factor: "); out.print(pow(2,b)); out.println(" chips/symbol");
+  out.print("Rx CRC: ");
+  if (reg & 0x4 == 0x4) {
+    out.println("Enabled");
+  } else {
+    out.println("Disabled");
+  }
+  
+  word preambleLen = 0;
+  reg = readRegister(REG_PREAMBLE_MSB);
+  preambleLen = reg << 8;
+  reg = readRegister(REG_PREAMBLE_LSB);
+  preambleLen += reg;
+  out.print("Preamble Length: ");
+  out.println(preambleLen);
+ 
+  reg = readRegister(REG_PAYLOAD_LENGTH);
+  out.print("Payload Length: "); out.println(reg);
+
+  reg = readRegister(REG_MODEM_CONFIG_3);
+  out.print("Low Data Rate Optimization: ");
+  if (reg & 0x4 == 0x4) {
+    out.println("Enabled");
+  } else {
+    out.println("Disabled");
+  }
+ 
+  if (reg & 0x2 == 0x2) {
+    out.print("Auto");
+  } else {
+    out.print("Manual");
+  }
+  out.println(" Gain Control");
+  
+  out.print("Wideband RSSI: "); out.println(readRegister(REG_RSSI_WIDEBAND));
+
+  reg = readRegister(REG_DETECTION_OPTIMIZE) & 0x7;
+  out.print("LoRa Detection Optimize: ");
+  if (reg == 0x3) {
+    out.println("SF7-SF12");
+  } else if (reg == 0x5) {
+    out.println("SF6");
+  } else {
+    out.println("Error");
+  }
+
+  reg = readRegister(REG_DETECTION_THRESHOLD);
+  out.print("LoRa Detection Threshold: ");
+  if (reg == 0xA) {
+    out.println("SF7-SF12");
+  } else if (reg == 0xC) {
+    out.println("SF6");
+  } else {
+    out.println("Error");
+  }
+
+  reg = readRegister(REG_SYNC_WORD);
+  out.print("LoRa Sync Word :"); out.println(reg,HEX);
+
+}  
 
 void LoRaClass::explicitHeaderMode()
 {

@@ -1,6 +1,3 @@
-// Copyright (c) Sandeep Mistry. All rights reserved.
-// Licensed under the MIT license. See LICENSE file in the project root for full license information.
-
 #ifndef LORA_H
 #define LORA_H
 
@@ -27,7 +24,6 @@ public:
   int parsePacket(int size = 0);
   int packetRssi();
   float packetSnr();
-  long packetFrequencyError();
 
   // from Print
   virtual size_t write(uint8_t byte);
@@ -65,14 +61,13 @@ public:
   void setSPIFrequency(uint32_t frequency);
 
   void dumpRegisters(Stream& out);
+  void dumpSettings(Stream& out);
 
 private:
   void explicitHeaderMode();
   void implicitHeaderMode();
 
   void handleDio0Rise();
-
-  long getSignalBandwidth();
 
   uint8_t readRegister(uint8_t address);
   void writeRegister(uint8_t address, uint8_t value);
@@ -85,7 +80,7 @@ private:
   int _ss;
   int _reset;
   int _dio0;
-  long _frequency;
+  int _frequency;
   int _packetIndex;
   int _implicitHeaderMode;
   void (*_onReceive)(int);
